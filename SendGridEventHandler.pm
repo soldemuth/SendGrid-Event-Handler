@@ -1,4 +1,4 @@
-r;
+package SendGridEventHandler;
 
 use strict;
 use warnings;
