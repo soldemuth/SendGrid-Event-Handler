@@ -5,36 +5,15 @@ use warnings;
 use 5.010;
 
 use Data::Dumper;
-use DBI;
 use Moo;
 
+use lib "$ENV{HOME}/local_lib/";
+
+use SendGridMessage;
+
 use base qw(
-    Class::Data::Inheritable
+    SendGridTable
 );
-
-__PACKAGE__->mk_classdata(_dbh => undef);
-
-sub dbh {
-    my ($class) = @_;
-
-    unless (
-           $class->_dbh()
-        && $class->_dbh()->ping()
-    ) {
-        $class->_dbh(
-            # update for FACT!
-            DBI->connect(
-                            {
-                    AutoCommit => 1,
-                    RaiseError => 1,
-                    PrintError => 0,
-                },
-            )
-        );
-    }
-
-    return $class->_dbh();
-}
 
 my %eventTypes = (
     processed         => 1,
@@ -51,13 +30,11 @@ my %eventTypes = (
 );
 
 my @_fieldOrder = qw(
+    sendGridMessageId
     email
     timestamp
-    smtpId
     eventTypeId
-    category
     sgEventId
-    sgMessageId
     reason
     response
     status
@@ -70,11 +47,10 @@ my @_fieldOrder = qw(
 
 my @_required = qw(
     email
-    smtpId
-    category
     sgEventId
-    sgMessageId
 );
+
+my %_allFields = map { $_ => undef } @_fieldOrder;
 
 my $_insertSQL =  q{
     INSERT INTO tSendGridEvent
@@ -117,22 +93,27 @@ sub camelCasifyValidate {
         my $nk = $k;
 
         if ($nk =~ s/(?:[_\-])([a-z])/\U$1/g) {
-            $rRec->{$nk} = delete $rRec->{$k};
-        }
-
-        # category might be json!; need
-        unless (($rRec->{timestamp} // '') =~ /^\d{10}$/) {
-            $rRec->{timestamp} = '0000-00-00 00:00:00';
-
-            warn 'Setting null for non-numeric timestamp';
-        }
-
-        $rRec->{eventTypeId} = $eventTypes{ $rRec->{event} } || 0;
-
-        foreach my $k (@_required) {
-            $rRec->{$k} //= '';
+            if (
+                   exists $_allFields{$nk}
+                || SendGridMessage->existsAllField($nk)
+            ) {
+                $rRec->{$nk} = delete $rRec->{$k};
+            }
         }
     }
+
+    foreach my $k (@_required) {
+        $rRec->{$k} //= '';
+    }
+
+    # category might be json!; need
+    unless (($rRec->{timestamp} // '') =~ /^\d{10}$/) {
+        $rRec->{timestamp} = '0000-00-00 00:00:00';
+
+        warn 'Setting zero for invalid timestamp';
+    }
+
+    $rRec->{eventTypeId} = $eventTypes{ $rRec->{event} } || 0;
 }
 
 my @sizes   = (1000, 100, 10, 1);
@@ -143,11 +124,11 @@ my %sizeSQL = (
 sub storeAll {
     my ($class, $rRecs) = @_;
 
-    my $rBind   = [];
-    my $insize  = 0;
     my $incount = 0;
+    my $insize  = 0;
+    my $rBind   = [];
+    my $rMsgIds = {};
     my $remains = scalar @$rRecs;
-
 
     foreach my $rRec (@$rRecs) {
         unless ($incount) {
@@ -163,6 +144,11 @@ sub storeAll {
         }
 
         $class->camelCasifyValidate($rRec);
+
+        $rRec->{sendGridMessageId} = SendGridMessage->upsert({
+            rMsgIds => $rMsgIds,
+            rRec    => $rRec,
+        });
 
         push @$rBind, map { $rRec->{$_} } @_fieldOrder;
 
@@ -184,6 +170,8 @@ sub storeAll {
             $rBind   = [];
         }
     }
+
+    $class->disconnect();
 }
 
 1;
